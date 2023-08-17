@@ -274,6 +274,14 @@ impl Default for KeymapConfig {
                     key_sequence: "s r".into(),
                     command: Command::ReverseTrackOrder,
                 },
+                Keymap {
+                    key_sequence: "C-k".into(),
+                    command: Command::MovePlaylistItemUp,
+                },
+                Keymap {
+                    key_sequence: "C-j".into(),
+                    command: Command::MovePlaylistItemDown,
+                },
             ],
         }
     }
@@ -330,6 +338,12 @@ impl KeymapConfig {
             .iter()
             .find(|&keymap| keymap.key_sequence == *key_sequence)
             .map(|keymap| keymap.command)
+    }
+}
+
+impl Keymap {
+    pub fn include_in_help_screen(&self) -> bool {
+        !matches!(&self.command, Command::None)
     }
 }
 
