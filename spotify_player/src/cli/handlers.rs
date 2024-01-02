@@ -1,15 +1,16 @@
 use crate::{
-    auth::{new_session_with_new_creds, AuthConfig},
-    state,
+    auth::{new_session, new_session_with_new_creds, AuthConfig},
+    client, event, state,
 };
 
 use super::*;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{ArgMatches, Id};
+use clap_complete::{generate, Shell};
 use std::net::UdpSocket;
 
 fn receive_response(socket: &UdpSocket) -> Result<Response> {
-    // read response from the server's socket, which can be splitted into
+    // read response from the server's socket, which can be split into
     // smaller chunks of data
     let mut data = Vec::new();
     let mut buf = [0; 4096];
@@ -25,27 +26,27 @@ fn receive_response(socket: &UdpSocket) -> Result<Response> {
     Ok(serde_json::from_slice(&data)?)
 }
 
-fn get_id_or_name(args: &ArgMatches) -> Result<IdOrName> {
+fn get_id_or_name(args: &ArgMatches) -> IdOrName {
     match args
         .get_one::<Id>("id_or_name")
         .expect("id_or_name group is required")
         .as_str()
     {
-        "name" => Ok(IdOrName::Name(
+        "name" => IdOrName::Name(
             args.get_one::<String>("name")
                 .expect("name should be specified")
                 .to_owned(),
-        )),
-        "id" => Ok(IdOrName::Id(
+        ),
+        "id" => IdOrName::Id(
             args.get_one::<String>("id")
                 .expect("id should be specified")
                 .to_owned(),
-        )),
-        id => anyhow::bail!("unknown id: {id}"),
+        ),
+        id => panic!("unknown id: {id}"),
     }
 }
 
-fn handle_get_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<()> {
+fn handle_get_subcommand(args: &ArgMatches) -> Result<Request> {
     let (cmd, args) = args.subcommand().expect("playback subcommand is required");
 
     let request = match cmd {
@@ -56,22 +57,21 @@ fn handle_get_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<()> {
                 .to_owned();
             Request::Get(GetRequest::Key(key))
         }
-        "context" => {
-            let context_type = args
-                .get_one::<ContextType>("context_type")
+        "item" => {
+            let item_type = args
+                .get_one::<ItemType>("item_type")
                 .expect("context_type is required")
                 .to_owned();
-            let id_or_name = get_id_or_name(args)?;
-            Request::Get(GetRequest::Context(context_type, id_or_name))
+            let id_or_name = get_id_or_name(args);
+            Request::Get(GetRequest::Item(item_type, id_or_name))
         }
         _ => unreachable!(),
     };
 
-    socket.send(&serde_json::to_vec(&request)?)?;
-    Ok(())
+    Ok(request)
 }
 
-fn handle_playback_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<()> {
+fn handle_playback_subcommand(args: &ArgMatches) -> Result<Request> {
     let (cmd, args) = args.subcommand().expect("playback subcommand is required");
     let command = match cmd {
         "start" => match args.subcommand() {
@@ -80,8 +80,14 @@ fn handle_playback_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<(
                     .get_one::<ContextType>("context_type")
                     .expect("context_type is required")
                     .to_owned();
-                let id_or_name = get_id_or_name(args)?;
-                Command::StartContext(context_type, id_or_name)
+                let shuffle = args.get_flag("shuffle");
+
+                let id_or_name = get_id_or_name(args);
+                Command::StartContext {
+                    context_type,
+                    id_or_name,
+                    shuffle,
+                }
             }
             Some(("liked", args)) => {
                 let limit = *args
@@ -95,7 +101,7 @@ fn handle_playback_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<(
                     .get_one::<ItemType>("item_type")
                     .expect("item_type is required")
                     .to_owned();
-                let id_or_name = get_id_or_name(args)?;
+                let id_or_name = get_id_or_name(args);
                 Command::StartRadio(item_type, id_or_name)
             }
             _ => {
@@ -103,6 +109,8 @@ fn handle_playback_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<(
             }
         },
         "play-pause" => Command::PlayPause,
+        "play" => Command::Play,
+        "pause" => Command::Pause,
         "next" => Command::Next,
         "previous" => Command::Previous,
         "shuffle" => Command::Shuffle,
@@ -126,53 +134,95 @@ fn handle_playback_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<(
         _ => unreachable!(),
     };
 
-    let request = Request::Playback(command);
-    socket.send(&serde_json::to_vec(&request)?)?;
+    Ok(Request::Playback(command))
+}
+
+/// Tries to connect to a running client, if exists, by sending a connection request
+/// to the client via a UDP socket.
+/// If no running client found, create a new client running in a separate thread to
+/// handle the socket request.
+fn try_connect_to_client(socket: &UdpSocket, configs: &state::Configs) -> Result<()> {
+    let port = configs.app_config.client_port;
+    socket.connect(("127.0.0.1", port))?;
+
+    // send an empty buffer as a connection request to the client
+    socket.send(&[])?;
+    if let Err(err) = socket.recv(&mut [0; 1]) {
+        if let std::io::ErrorKind::ConnectionRefused = err.kind() {
+            // no running `spotify_player` instance found,
+            // initialize a new client to handle the current CLI command
+
+            let (client_pub, _) = flume::unbounded::<event::ClientRequest>();
+
+            let auth_config = AuthConfig::new(configs)?;
+            let rt = tokio::runtime::Runtime::new()?;
+            let session = rt.block_on(new_session(&auth_config, false))?;
+
+            // create a Spotify API client
+            let client = client::Client::new(
+                session,
+                auth_config,
+                configs.app_config.client_id.clone(),
+                client_pub,
+            );
+            rt.block_on(client.init_token())?;
+
+            // create a client socket for handling CLI commands
+            let client_socket = rt.block_on(tokio::net::UdpSocket::bind(("127.0.0.1", port)))?;
+
+            // spawn a thread to handle the CLI request
+            std::thread::spawn(move || rt.block_on(start_socket(client, client_socket, None)));
+        } else {
+            return Err(err.into());
+        }
+    }
 
     Ok(())
 }
 
-fn handle_connect_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<()> {
-    let id_or_name = get_id_or_name(args)?;
-
-    let request = Request::Connect(id_or_name);
-    socket.send(&serde_json::to_vec(&request)?)?;
-
-    Ok(())
-}
-
-fn handle_like_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<()> {
-    let unlike = args.get_flag("unlike");
-
-    let request = Request::Like { unlike };
-    socket.send(&serde_json::to_vec(&request)?)?;
-
-    Ok(())
-}
-
-pub fn handle_cli_subcommand(
-    cmd: &str,
-    args: &ArgMatches,
-    state: &state::SharedState,
-) -> Result<()> {
+pub fn handle_cli_subcommand(cmd: &str, args: &ArgMatches, configs: &state::Configs) -> Result<()> {
     let socket = UdpSocket::bind("127.0.0.1:0")?;
-    socket.connect(("127.0.0.1", state.app_config.client_port))?;
 
+    // handle commands that don't require a client separately
     match cmd {
-        "get" => handle_get_subcommand(args, &socket)?,
-        "playback" => handle_playback_subcommand(args, &socket)?,
-        "playlist" => handle_playlist_subcommand(args, &socket)?,
-        "connect" => handle_connect_subcommand(args, &socket)?,
-        "like" => handle_like_subcommand(args, &socket)?,
         "authenticate" => {
-            let auth_config = AuthConfig::new(state)?;
+            let auth_config = AuthConfig::new(configs)?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(new_session_with_new_creds(&auth_config))?;
             std::process::exit(0);
         }
-        _ => unreachable!(),
+        "generate" => {
+            let gen = *args
+                .get_one::<Shell>("shell")
+                .expect("shell argument is required");
+            let mut cmd = init_cli()?;
+            let name = cmd.get_name().to_string();
+            generate(gen, &mut cmd, name, &mut std::io::stdout());
+            std::process::exit(0);
+        }
+        _ => {}
     }
 
+    try_connect_to_client(&socket, configs).context("try to connect to a client")?;
+
+    // construct a socket request based on the CLI command and its arguments
+    let request = match cmd {
+        "get" => handle_get_subcommand(args)?,
+        "playback" => handle_playback_subcommand(args)?,
+        "playlist" => handle_playlist_subcommand(args)?,
+        "connect" => Request::Connect(get_id_or_name(args)),
+        "like" => Request::Like {
+            unlike: args.get_flag("unlike"),
+        },
+        _ => unreachable!(),
+    };
+
+    // send the request to the client's socket
+    let request_buf = serde_json::to_vec(&request)?;
+    assert!(request_buf.len() <= MAX_REQUEST_SIZE);
+    socket.send(&request_buf)?;
+
+    // receive and handle a response from the client's socket
     match receive_response(&socket)? {
         Response::Err(err) => {
             eprintln!("{}", String::from_utf8_lossy(&err));
@@ -185,7 +235,7 @@ pub fn handle_cli_subcommand(
     }
 }
 
-fn handle_playlist_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<()> {
+fn handle_playlist_subcommand(args: &ArgMatches) -> Result<Request> {
     let (cmd, args) = args.subcommand().expect("playlist subcommand is required");
     let command = match cmd {
         "new" => {
@@ -270,8 +320,5 @@ fn handle_playlist_subcommand(args: &ArgMatches, socket: &UdpSocket) -> Result<(
         _ => unreachable!(),
     };
 
-    let request = Request::Playlist(command);
-    socket.send(&serde_json::to_vec(&request)?)?;
-
-    Ok(())
+    Ok(Request::Playlist(command))
 }

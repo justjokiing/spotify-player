@@ -1,8 +1,10 @@
 pub use rspotify::model as rspotify_model;
+use rspotify::model::CurrentPlaybackContext;
 pub use rspotify::model::{AlbumId, ArtistId, Id, PlaylistId, TrackId, UserId};
 
-use crate::utils::{format_duration, map_join};
-use serde::Serialize;
+use crate::utils::map_join;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(untagged)]
@@ -100,6 +102,7 @@ pub struct SimplifiedPlayback {
     pub is_playing: bool,
     pub repeat_state: rspotify_model::RepeatState,
     pub shuffle_state: bool,
+    pub mute_state: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,27 +112,20 @@ pub struct Device {
     pub name: String,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 /// A Spotify track
 pub struct Track {
     pub id: TrackId<'static>,
     pub name: String,
     pub artists: Vec<Artist>,
     pub album: Option<Album>,
-    #[serde(serialize_with = "serialize_duration")]
-    pub duration: chrono::Duration,
+    pub duration: std::time::Duration,
+    pub explicit: bool,
     #[serde(skip)]
     pub added_at: u64,
 }
 
-pub fn serialize_duration<S>(dur: &chrono::Duration, s: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    s.serialize_str(&format_duration(dur))
-}
-
-#[derive(Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 /// A Spotify album
 pub struct Album {
     pub id: AlbumId<'static>,
@@ -138,14 +134,14 @@ pub struct Album {
     pub artists: Vec<Artist>,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 /// A Spotify artist
 pub struct Artist {
     pub id: ArtistId<'static>,
     pub name: String,
 }
 
-#[derive(Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 /// A Spotify playlist
 pub struct Playlist {
     pub id: PlaylistId<'static>,
@@ -240,28 +236,55 @@ impl Track {
             .unwrap_or_default()
     }
 
+    /// gets the track's name, including an explicit label
+    pub fn display_name(&self) -> Cow<'_, str> {
+        if self.explicit {
+            Cow::Owned(format!("{} (E)", self.name))
+        } else {
+            Cow::Borrowed(self.name.as_str())
+        }
+    }
+
     /// tries to convert from a `rspotify_model::SimplifiedTrack` into `Track`
     pub fn try_from_simplified_track(track: rspotify_model::SimplifiedTrack) -> Option<Self> {
-        Some(Self {
-            id: track.id?,
-            name: track.name,
-            artists: from_simplified_artists_to_artists(track.artists),
-            album: None,
-            duration: track.duration,
-            added_at: 0,
-        })
+        if track.is_playable.unwrap_or(true) {
+            let id = match track.linked_from {
+                Some(d) => d.id,
+                None => track.id?,
+            };
+            Some(Self {
+                id,
+                name: track.name,
+                artists: from_simplified_artists_to_artists(track.artists),
+                album: None,
+                duration: track.duration.to_std().expect("valid chrono duration"),
+                explicit: track.explicit,
+                added_at: 0,
+            })
+        } else {
+            None
+        }
     }
 
     /// tries to convert from a `rspotify_model::FullTrack` into `Track`
     pub fn try_from_full_track(track: rspotify_model::FullTrack) -> Option<Self> {
-        Some(Self {
-            id: track.id?,
-            name: track.name,
-            artists: from_simplified_artists_to_artists(track.artists),
-            album: Album::try_from_simplified_album(track.album),
-            duration: track.duration,
-            added_at: 0,
-        })
+        if track.is_playable.unwrap_or(true) {
+            let id = match track.linked_from {
+                Some(d) => d.id,
+                None => track.id?,
+            };
+            Some(Self {
+                id,
+                name: track.name,
+                artists: from_simplified_artists_to_artists(track.artists),
+                album: Album::try_from_simplified_album(track.album),
+                duration: track.duration.to_std().expect("valid chrono duration"),
+                explicit: track.explicit,
+                added_at: 0,
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -270,7 +293,7 @@ impl std::fmt::Display for Track {
         write!(
             f,
             "{} • {} ▎ {}",
-            self.name,
+            self.display_name(),
             self.artists_info(),
             self.album_info(),
         )
@@ -286,6 +309,15 @@ impl Album {
             release_date: album.release_date.unwrap_or_default(),
             artists: from_simplified_artists_to_artists(album.artists),
         })
+    }
+
+    /// gets the album's release year
+    pub fn year(&self) -> String {
+        self.release_date
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .to_string()
     }
 }
 
@@ -304,9 +336,10 @@ impl std::fmt::Display for Album {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} • {}",
+            "{} • {} ({})",
             self.name,
-            map_join(&self.artists, |a| &a.name, ", ")
+            map_join(&self.artists, |a| &a.name, ", "),
+            self.year()
         )
     }
 }
@@ -435,6 +468,20 @@ impl Playback {
 
                 Playback::URIs(ids, Some(rspotify_model::Offset::Uri(uri)))
             }
+        }
+    }
+}
+
+impl SimplifiedPlayback {
+    pub fn from_playback(p: &CurrentPlaybackContext) -> Self {
+        Self {
+            device_name: p.device.name.clone(),
+            device_id: p.device.id.clone(),
+            is_playing: p.is_playing,
+            volume: p.device.volume_percent,
+            repeat_state: p.repeat_state,
+            shuffle_state: p.shuffle_state,
+            mute_state: None,
         }
     }
 }

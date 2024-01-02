@@ -56,6 +56,10 @@ impl Default for KeymapConfig {
                     command: Command::VolumeDown,
                 },
                 Keymap {
+                    key_sequence: "_".into(),
+                    command: Command::Mute,
+                },
+                Keymap {
                     key_sequence: ">".into(),
                     command: Command::SeekForward,
                 },
@@ -78,6 +82,10 @@ impl Default for KeymapConfig {
                 Keymap {
                     key_sequence: "z".into(),
                     command: Command::Queue,
+                },
+                Keymap {
+                    key_sequence: "C-z".into(),
+                    command: Command::AddSelectedItemToQueue,
                 },
                 Keymap {
                     key_sequence: "Z".into(),
@@ -173,6 +181,11 @@ impl Default for KeymapConfig {
                 Keymap {
                     key_sequence: "C-q".into(),
                     command: Command::PreviousPage,
+                },
+                #[cfg(feature = "clipboard")]
+                Keymap {
+                    key_sequence: "O".into(),
+                    command: Command::OpenSpotifyLinkFromClipboard,
                 },
                 Keymap {
                     key_sequence: "?".into(),

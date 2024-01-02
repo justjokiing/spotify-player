@@ -14,6 +14,7 @@ pub enum Command {
     Shuffle,
     VolumeUp,
     VolumeDown,
+    Mute,
     SeekForward,
     SeekBackward,
 
@@ -61,6 +62,8 @@ pub enum Command {
     SearchPage,
     BrowsePage,
     PreviousPage,
+    #[cfg(feature = "clipboard")]
+    OpenSpotifyLinkFromClipboard,
 
     SortTrackByTitle,
     SortTrackByArtists,
@@ -149,6 +152,7 @@ impl Command {
             Self::Shuffle => "toggle the shuffle mode",
             Self::VolumeUp => "increase playback volume by 5%",
             Self::VolumeDown => "decrease playback volume by 5%",
+            Self::Mute => "toggle playback volume between 0% and previous level",
             Self::SeekForward => "seek forward by 5s",
             Self::SeekBackward => "seek backward by 5s",
             Self::Quit => "quit the application",
@@ -192,10 +196,12 @@ impl Command {
             Self::LikedTrackPage => "go to the user liked track page",
             #[cfg(feature = "lyric-finder")]
             Self::LyricPage => "go to the lyric page of the current track",
-            Self::LibraryPage => "go to the user libary page",
+            Self::LibraryPage => "go to the user library page",
             Self::SearchPage => "go to the search page",
             Self::BrowsePage => "go to the browse page",
             Self::PreviousPage => "go to the previous page",
+            #[cfg(feature = "clipboard")]
+            Self::OpenSpotifyLinkFromClipboard => "open a Spotify link from clipboard",
             Self::SortTrackByTitle => "sort the track table (if any) by track's title",
             Self::SortTrackByArtists => "sort the track table (if any) by track's artists",
             Self::SortTrackByAlbum => "sort the track table (if any) by track's album",

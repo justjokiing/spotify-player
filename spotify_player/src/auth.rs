@@ -8,7 +8,7 @@ use librespot_core::{
     session::{Session, SessionError},
 };
 
-use crate::state::SharedState;
+use crate::state;
 
 #[derive(Clone)]
 pub struct AuthConfig {
@@ -26,15 +26,15 @@ impl Default for AuthConfig {
 }
 
 impl AuthConfig {
-    pub fn new(state: &SharedState) -> Result<AuthConfig> {
-        let audio_cache_folder = if state.app_config.device.audio_cache {
-            Some(state.cache_folder.join("audio"))
+    pub fn new(configs: &state::Configs) -> Result<AuthConfig> {
+        let audio_cache_folder = if configs.app_config.device.audio_cache {
+            Some(configs.cache_folder.join("audio"))
         } else {
             None
         };
 
         let cache = Cache::new(
-            Some(state.cache_folder.clone()),
+            Some(configs.cache_folder.clone()),
             None,
             audio_cache_folder,
             None,
@@ -42,7 +42,7 @@ impl AuthConfig {
 
         Ok(AuthConfig {
             cache,
-            session_config: state.app_config.session_config(),
+            session_config: configs.app_config.session_config(),
         })
     }
 }
@@ -128,17 +128,10 @@ pub async fn new_session(auth_config: &AuthConfig, reauth: bool) -> Result<Sessi
                 }
                 Err(err) => match err {
                     SessionError::AuthenticationError(err) => {
-                        let msg =
-                            format!("Failed to authenticate using cached credentials: {err:#}");
-                        if reauth {
-                            eprintln!("{msg}");
-                            new_session_with_new_creds(auth_config).await
-                        } else {
-                            anyhow::bail!(msg);
-                        }
+                        anyhow::bail!("Failed to authenticate using cached credentials: {err:#}");
                     }
                     SessionError::IoError(err) => {
-                        anyhow::bail!("{err}\nPlease check your internet connection.");
+                        anyhow::bail!("{err:#}\nPlease check your internet connection.");
                     }
                 },
             }

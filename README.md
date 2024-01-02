@@ -4,12 +4,12 @@
 
 - [Introduction](#introduction)
 - [Examples](#examples)
-  - [Demo](#demo)
 - [Installation](#installation)
 - [Features](#features)
   - [Spotify Connect](#spotify-connect)
   - [Streaming](#streaming)
   - [Lyric](#lyric)
+  - [Clipboard](#clipboard)
   - [Media Control](#media-control)
   - [Image](#image)
   - [Notify](#notify)
@@ -42,39 +42,9 @@
 
 ## Examples
 
-### Demo
-
 A demo of `spotify_player` `v0.5.0-pre-release` on [youtube](https://www.youtube.com/shorts/Jbfe9GLNWbA) or on [asciicast](https://asciinema.org/a/446913):
 
-[![asciicast](https://asciinema.org/a/446913.svg)](https://asciinema.org/a/446913)
-
-### Playlist page
-
-![Playlist page example](https://user-images.githubusercontent.com/40011582/140253591-706d15d4-08c9-4527-997a-79fac73dee20.png)
-
-### Artist page
-
-![Artist page example](https://user-images.githubusercontent.com/40011582/140253630-d958c5ea-23bc-4528-b40b-aa6fa68b5735.png)
-
-### Album page
-
-![Album page example](https://user-images.githubusercontent.com/40011582/140253687-fd036da9-3b71-443b-a7f9-dad7721f01bf.png)
-
-### Search page
-
-![Search page example](https://user-images.githubusercontent.com/40011582/140253653-5b156a8f-538b-4e68-9d52-0a379477574f.png)
-
-### Lyric page
-
-![Lyric page example](https://user-images.githubusercontent.com/40011582/169437044-420cf0e2-5d75-4022-bd9f-34540f1fe230.png)
-
-### Command help popup
-
-![Command help popup example](https://user-images.githubusercontent.com/40011582/169437229-f5f1a3a5-d89e-4395-a416-6d45018f8971.png)
-
-### Recommendation page
-
-![Recommendation page example](https://user-images.githubusercontent.com/40011582/169440280-2f075ab1-04c3-419a-8614-0cad9c004d4f.gif)
+Checkout [examples/README.md](./examples/README.md) for more examples.
 
 ## Installation
 
@@ -93,14 +63,10 @@ A Spotify Premium account is **required**.
 ##### Linux
 
 - [Rust and cargo](https://www.rust-lang.org/tools/install) as the build dependencies
-- `openssl`, `alsa-lib` (`streaming` feature), `libdbus` (`media-control` feature) system libraries.
-  - On Debian based systems, run the below command to install application's dependencies:
+- install `openssl`, `alsa-lib` (`streaming` feature), `libdbus` (`media-control` feature), `libxcb` (`clipboard` feature) system libraries.
+  - For example, on Debian based systems, run the below command to install application's dependencies:
     ```shell
-    sudo apt install libssl-dev libasound2-dev libdbus-1-dev
-    ```
-  - On Fedora based systems, run the below command to install application's dependencies:
-    ```shell
-    sudo yum install openssl-devel alsa-lib-devel dbus-devel
+    sudo apt install libssl-dev libasound2-dev libdbus-1-dev libxcb-shape0-dev libxcb-xfixes0-dev
     ```
 
 ### Binaries
@@ -112,6 +78,10 @@ Application's prebuilt binaries can be found in the [Releases Page](https://gith
 ### Homebrew
 
 Run `brew install spotify_player` to install the application.
+
+### Scoop
+
+Run `scoop install spotify-player` to install the application.
 
 ### Cargo
 
@@ -177,10 +147,6 @@ More details about registering a Spotify application can be found in the [offici
 
 When `spotify_player` runs with your own `client_id`, press **D** (default shortcut for `SwitchDevice` command) to get the list of available devices, then press **enter** (default shortcut for `ChooseSelected` command) to connect to the selected device.
 
-An example of using Spotify connect to interact with the Spotify's official application:
-
-![Spotify Connect Example](https://user-images.githubusercontent.com/40011582/140323795-8a7ed2bb-7bda-4db2-9672-6036eac6e771.gif)
-
 ### Streaming
 
 `spotify_player` supports streaming, which needs to be built/installed with `streaming` feature (**enabled** by default) **and** with an audio backend (`rodio-backend` by default). The streaming feature allows to `spotify_player` to play music directly from terminal.
@@ -228,6 +194,10 @@ cargo install spotify_player --features lyric-finder
 User can view lyric of the currently playing track by calling the `LyricPage` command to go the lyric page. To do this, `spotify_player` needs to be built with a `lyric-finder` feature.
 
 Under the hood, `spotify_player` retrieves the song's lyric using [Genius.com](https://genius.com).
+
+### Clipboard
+
+To enable clipboard support, `spotify_player` needs to be built/installed with `clipboard` feature (**enabled** by default).
 
 ### Media Control
 
@@ -300,8 +270,9 @@ You can run the application as a daemon by specifying the `-d` or `--daemon` opt
 
 **Notes**:
 
+- `daemon` feature is not supported on Windows
 - `daemon` feature requires the `streaming` feature to be enabled and the application to be built with [an audio backend](#audio-backend)
-- because of the OS's restrictions, `daemon` feature doesn't work with the `media-control` feature on Windows and MacOS, which is **enabled by default**. In other words, if you want to use the `daemon` feature on Windows or MacOS, you must install the application with `media-control` feature **disabled**:
+- because of the OS's restrictions, `daemon` feature doesn't work with the `media-control` feature on MacOS, which is **enabled by default**. In other words, if you want to use the `daemon` feature on MacOS, you must install the application with `media-control` feature **disabled**:
 
   ```shell
   cargo install spotify_player --no-default-features --features daemon,rodio-backend
@@ -309,11 +280,7 @@ You can run the application as a daemon by specifying the `-d` or `--daemon` opt
 
 ### CLI Commands
 
-`spotify_player` offers several CLI commands to interact with **a running `spotify_player` instance**.
-
-Under the hood, the application handles a CLI command by sending requests to a `spotify_player` instance's client socket running on the `client_port` port, a general application configuration with a default value `8080`.
-
-Lists of CLI commands:
+`spotify_player` offers several CLI commands to interact with Spotify:
 
 - `get`: Get Spotify data (playlist/album/artist data, user's data, etc)
 - `playback`: Interact with the playback (start a playback, play-pause, next, etc)
@@ -323,6 +290,11 @@ Lists of CLI commands:
 - `playlist`: Playlist editing (new, delete, import, fork, etc)
 
 For more details, run `spotify_player -h` or `spotify_player {command} -h`, in which `{command}` is a CLI command.
+
+**Notes**
+
+- When using the CLI for the first time, you'll need to run `spotify_player authenticate` to authenticate the application beforehand.
+- Under the hood, CLI command is handled by sending requests to a `spotify_player` client socket running on port `client_port`, [a general application configuration](https://github.com/aome510/spotify-player/blob/master/docs/config.md#general) with a default value of `8080`. If there is no running application's instance, a new client will be created upon handling the CLI commands, which increases the latency of the command.
 
 ## Commands
 
@@ -340,6 +312,7 @@ List of supported commands:
 | `Shuffle`                      | toggle the shuffle mode                                                 | `C-s`              |
 | `VolumeUp`                     | increase playback volume by 5%                                          | `+`                |
 | `VolumeDown`                   | decrease playback volume by 5%                                          | `-`                |
+| `Mute`                         | toggle playback volume between 0% and previous level                    | `_`                |
 | `SeekForward`                  | seek forward by 5s                                                      | `>`                |
 | `SeekBackward`                 | seek backward by 5s                                                     | `<`                |
 | `Quit`                         | quit the application                                                    | `C-c`, `q`         |
@@ -356,7 +329,7 @@ List of supported commands:
 | `RestartIntegratedClient`      | restart the integrated librespot client (`streaming` feature only)      | `R`                |
 | `ShowActionsOnSelectedItem`    | open a popup showing actions on a selected item                         | `g a`, `C-space`   |
 | `ShowActionsOnCurrentTrack`    | open a popup showing actions on the current track                       | `a`                |
-| `AddSelectedItemToQueue`       | add the selected item to queue                                          | `Z`                |
+| `AddSelectedItemToQueue`       | add the selected item to queue                                          | `Z`, `C-z`         |
 | `FocusNextWindow`              | focus the next focusable window (if any)                                | `tab`              |
 | `FocusPreviousWindow`          | focus the previous focusable window (if any)                            | `backtab`          |
 | `SwitchTheme`                  | open a popup for switching theme                                        | `T`                |
@@ -375,11 +348,12 @@ List of supported commands:
 | `SearchPage`                   | go to the search page                                                   | `g s`              |
 | `BrowsePage`                   | go to the browse page                                                   | `g b`              |
 | `PreviousPage`                 | go to the previous page                                                 | `backspace`, `C-q` |
+| `OpenSpotifyLinkFromClipboard` | open a Spotify link from clipboard (`clipboard` feature only)           | `O`                |
 | `SortTrackByTitle`             | sort the track table (if any) by track's title                          | `s t`              |
 | `SortTrackByArtists`           | sort the track table (if any) by track's artists                        | `s a`              |
 | `SortTrackByAlbum`             | sort the track table (if any) by track's album                          | `s A`              |
-| `SortTrackByDuration`          | sort the track table (if any) by track's duration                       | `s d`              |
 | `SortTrackByAddedDate`         | sort the track table (if any) by track's added date                     | `s D`              |
+| `SortTrackByDuration`          | sort the track table (if any) by track's duration                       | `s d`              |
 | `ReverseOrder`                 | reverse the order of the track table (if any)                           | `s r`              |
 | `MovePlaylistItemUp`           | move playlist item up one position                                      | `C-k`              |
 | `MovePlaylistItemDown`         | move playlist item down one position                                    | `C-j`              |

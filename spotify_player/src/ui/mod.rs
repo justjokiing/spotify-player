@@ -1,9 +1,8 @@
 use crate::{config, state::*};
 use anyhow::{Context as AnyhowContext, Result};
-use tui::{layout::*, style::*, text::*, widgets::*};
+use tui::{layout::*, style::*, text::*, widgets::*, Frame};
 
 type Terminal = tui::Terminal<tui::backend::CrosstermBackend<std::io::Stdout>>;
-type Frame<'a> = tui::Frame<'a, tui::backend::CrosstermBackend<std::io::Stdout>>;
 
 mod page;
 mod playback;
@@ -15,7 +14,9 @@ pub fn run(state: SharedState) -> Result<()> {
     let mut terminal = init_ui().context("failed to initialize the application's UI")?;
 
     let ui_refresh_duration =
-        std::time::Duration::from_millis(state.app_config.app_refresh_duration_in_ms);
+        std::time::Duration::from_millis(state.configs.app_config.app_refresh_duration_in_ms);
+    let mut last_terminal_size = None;
+
     loop {
         {
             let mut ui = state.ui.lock();
@@ -24,12 +25,35 @@ pub fn run(state: SharedState) -> Result<()> {
                 std::process::exit(0);
             }
 
-            if let Err(err) = terminal.draw(|frame| {
-                // set the background and foreground colors for the application
-                let block = Block::default().style(ui.theme.app_style());
-                frame.render_widget(block, frame.size());
+            let terminal_size = terminal.size()?;
+            if Some(terminal_size) != last_terminal_size {
+                last_terminal_size = Some(terminal_size);
+                #[cfg(feature = "image")]
+                {
+                    // redraw the cover image when the terminal's size changes
+                    ui.last_cover_image_render_info = None;
+                }
+            }
 
-                if let Err(err) = render_application(frame, &state, &mut ui, frame.size()) {
+            if let Err(err) = terminal.draw(|frame| {
+                #[cfg(feature = "image")]
+                {
+                    for x in 1..state.configs.app_config.cover_img_length + 1 {
+                        for y in 1..state.configs.app_config.cover_img_width + 1 {
+                            frame
+                                .buffer_mut()
+                                .get_mut(x as u16, y as u16)
+                                .set_skip(true);
+                        }
+                    }
+                }
+
+                // set the background and foreground colors for the application
+                let rect = frame.size();
+                let block = Block::default().style(ui.theme.app_style());
+                frame.render_widget(block, rect);
+
+                if let Err(err) = render_application(frame, &state, &mut ui, rect) {
                     tracing::error!("Failed to render the application: {err:#}");
                 }
             }) {

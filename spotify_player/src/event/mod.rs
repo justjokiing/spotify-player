@@ -7,7 +7,11 @@ use crate::{
 
 #[cfg(feature = "lyric-finder")]
 use crate::utils::map_join;
+#[cfg(feature = "clipboard")]
+use anyhow::Context as _;
 use anyhow::Result;
+#[cfg(feature = "clipboard")]
+use copypasta::{ClipboardContext, ClipboardProvider};
 
 mod page;
 mod popup;
@@ -18,13 +22,16 @@ mod window;
 pub enum PlayerRequest {
     NextTrack,
     PreviousTrack,
+    Resume,
+    Pause,
     ResumePause,
     SeekTrack(chrono::Duration),
     Repeat,
     Shuffle,
     Volume(u8),
+    ToggleMute,
     TransferPlayback(String, bool),
-    StartPlayback(Playback),
+    StartPlayback(Playback, Option<bool>),
 }
 
 #[derive(Debug)]
@@ -138,6 +145,7 @@ fn handle_key_event(
     let mut key_sequence = state.ui.lock().input_key_sequence.clone();
     key_sequence.keys.push(key.clone());
     if state
+        .configs
         .keymap_config
         .find_matched_prefix_keymaps(&key_sequence)
         .is_empty()
@@ -173,6 +181,7 @@ fn handle_key_event(
     // if the key sequence is not handled, let the global command handler handle it
     let handled = if !handled {
         match state
+            .configs
             .keymap_config
             .find_command_from_key_sequence(&key_sequence)
         {
@@ -235,6 +244,9 @@ fn handle_global_command(
                     client_pub.send(ClientRequest::Player(PlayerRequest::Volume(volume as u8)))?;
                 }
             }
+        }
+        Command::Mute => {
+            client_pub.send(ClientRequest::Player(PlayerRequest::ToggleMute))?;
         }
         Command::SeekForward => {
             if let Some(progress) = state.player.read().playback_progress() {
@@ -351,6 +363,55 @@ fn handle_global_command(
                 ui.popup = None;
             }
         }
+        #[cfg(feature = "clipboard")]
+        Command::OpenSpotifyLinkFromClipboard => {
+            let content = get_clipboard_content().context("get clipboard's content")?;
+            let re = regex::Regex::new(
+                r"https://open.spotify.com/(?P<type>.*?)/(?P<id>[[:alnum:]]*).*",
+            )?;
+            if let Some(cap) = re.captures(&content) {
+                let typ = cap.name("type").expect("valid capture").as_str();
+                let id = cap.name("id").expect("valid capture").as_str();
+                match typ {
+                    // for track link, play the song
+                    "track" => {
+                        let id = TrackId::from_id(id)?.into_static();
+                        client_pub.send(ClientRequest::Player(PlayerRequest::StartPlayback(
+                            Playback::URIs(vec![id], None),
+                            None,
+                        )))?;
+                    }
+                    // for playlist/artist/album link, go to the corresponding context page
+                    "playlist" => {
+                        let id = PlaylistId::from_id(id)?.into_static();
+                        ui.create_new_page(PageState::Context {
+                            id: None,
+                            context_page_type: ContextPageType::Browsing(ContextId::Playlist(id)),
+                            state: None,
+                        });
+                    }
+                    "artist" => {
+                        let id = ArtistId::from_id(id)?.into_static();
+                        ui.create_new_page(PageState::Context {
+                            id: None,
+                            context_page_type: ContextPageType::Browsing(ContextId::Artist(id)),
+                            state: None,
+                        });
+                    }
+                    "album" => {
+                        let id = AlbumId::from_id(id)?.into_static();
+                        ui.create_new_page(PageState::Context {
+                            id: None,
+                            context_page_type: ContextPageType::Browsing(ContextId::Album(id)),
+                            state: None,
+                        });
+                    }
+                    e => anyhow::bail!("unsupported Spotify type {e}!"),
+                }
+            } else {
+                tracing::warn!("clipboard's content ({content}) is not a valid Spotify link!");
+            }
+        }
         #[cfg(feature = "lyric-finder")]
         Command::LyricPage => {
             if let Some(track) = state.player.read().current_playing_track() {
@@ -373,7 +434,7 @@ fn handle_global_command(
         }
         Command::SwitchTheme => {
             // get the available themes with the current theme moved to the first position
-            let mut themes = state.theme_config.themes.clone();
+            let mut themes = state.configs.theme_config.themes.clone();
             let id = themes.iter().position(|t| t.name == ui.theme.name);
             if let Some(id) = id {
                 let theme = themes.remove(id);
@@ -403,4 +464,17 @@ fn handle_global_command(
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+#[cfg(feature = "clipboard")]
+fn get_clipboard_content() -> Result<String> {
+    let mut clipboard_ctx = match ClipboardContext::new() {
+        Ok(ctx) => ctx,
+        Err(err) => anyhow::bail!("{err:#}"),
+    };
+    let content = match clipboard_ctx.get_contents() {
+        Ok(content) => content,
+        Err(err) => anyhow::bail!("{err:#}"),
+    };
+    Ok(content)
 }

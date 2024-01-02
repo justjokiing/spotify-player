@@ -26,6 +26,7 @@ pub struct AppConfig {
     pub client_port: u16,
 
     pub copy_command: Command,
+    pub player_event_hook_command: Option<Command>,
 
     pub playback_format: String,
     #[cfg(feature = "notify")]
@@ -40,12 +41,8 @@ pub struct AppConfig {
     // duration configs
     pub app_refresh_duration_in_ms: u64,
     pub playback_refresh_duration_in_ms: u64,
-    #[cfg(feature = "image")]
-    pub cover_image_refresh_duration_in_ms: u64,
 
     pub page_size_in_rows: usize,
-
-    pub track_table_item_max_len: usize,
 
     // icon configs
     pub play_icon: String,
@@ -71,13 +68,19 @@ pub struct AppConfig {
     pub enable_media_control: bool,
 
     #[cfg(feature = "streaming")]
-    pub enable_streaming: bool,
+    pub enable_streaming: StreamingType,
+
+    #[cfg(feature = "notify")]
+    pub enable_notify: bool,
 
     pub enable_cover_image_cache: bool,
 
     pub default_device: String,
 
     pub device: DeviceConfig,
+
+    #[cfg(all(feature = "streaming", feature = "notify"))]
+    pub notify_streaming_only: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -118,6 +121,7 @@ pub struct DeviceConfig {
     pub volume: u8,
     pub bitrate: u16,
     pub audio_cache: bool,
+    pub normalization: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, ConfigParse, Clone)]
@@ -127,11 +131,47 @@ pub struct NotifyFormat {
     pub body: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(from = "StreamingTypeOrBool")]
+pub enum StreamingType {
+    Always,
+    DaemonOnly,
+    Never,
+}
+config_parser_impl!(StreamingType);
+
+// For backward compatibility, to accept booleans for enable_streaming
+#[derive(Deserialize)]
+enum RawStreamingType {
+    Always,
+    DaemonOnly,
+    Never,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StreamingTypeOrBool {
+    Bool(bool),
+    Type(RawStreamingType),
+}
+
+impl From<StreamingTypeOrBool> for StreamingType {
+    fn from(v: StreamingTypeOrBool) -> Self {
+        match v {
+            StreamingTypeOrBool::Bool(true) => StreamingType::Always,
+            StreamingTypeOrBool::Bool(false) => StreamingType::Never,
+            StreamingTypeOrBool::Type(RawStreamingType::Always) => StreamingType::Always,
+            StreamingTypeOrBool::Type(RawStreamingType::DaemonOnly) => StreamingType::DaemonOnly,
+            StreamingTypeOrBool::Type(RawStreamingType::Never) => StreamingType::Never,
+        }
+    }
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             theme: "dracula".to_owned(),
-            // official spotify web app's client id
+            // official Spotify web app's client id
             client_id: "65b708073fc0480ea92a077233ca87bd".to_string(),
 
             client_port: 8080,
@@ -161,17 +201,14 @@ impl Default for AppConfig {
                 args: vec![],
             },
 
+            player_event_hook_command: None,
+
             proxy: None,
             ap_port: None,
             app_refresh_duration_in_ms: 32,
             playback_refresh_duration_in_ms: 0,
 
-            #[cfg(feature = "image")]
-            cover_image_refresh_duration_in_ms: 2000,
-
             page_size_in_rows: 20,
-
-            track_table_item_max_len: 32,
 
             pause_icon: "▌▌".to_string(),
             play_icon: "▶".to_string(),
@@ -203,13 +240,19 @@ impl Default for AppConfig {
             enable_media_control: true,
 
             #[cfg(feature = "streaming")]
-            enable_streaming: true,
+            enable_streaming: StreamingType::Always,
+
+            #[cfg(feature = "notify")]
+            enable_notify: true,
 
             enable_cover_image_cache: true,
 
             default_device: "spotify-player".to_string(),
 
             device: DeviceConfig::default(),
+
+            #[cfg(all(feature = "streaming", feature = "notify"))]
+            notify_streaming_only: false,
         }
     }
 }
@@ -219,22 +262,19 @@ impl Default for DeviceConfig {
         Self {
             name: "spotify-player".to_string(),
             device_type: "speaker".to_string(),
-            volume: 50,
-            bitrate: 160,
+            volume: 70,
+            bitrate: 320,
             audio_cache: false,
+            normalization: false,
         }
     }
 }
 
 impl AppConfig {
-    pub fn new(path: &Path, theme: Option<&String>) -> Result<Self> {
+    pub fn new(path: &Path) -> Result<Self> {
         let mut config = Self::default();
         if !config.parse_config_file(path)? {
             config.write_config_file(path)?
-        }
-
-        if let Some(theme) = theme {
-            config.theme = theme.to_owned()
         }
 
         Ok(config)

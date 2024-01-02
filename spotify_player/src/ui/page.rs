@@ -86,7 +86,12 @@ pub fn render_search_page(
             .map(|s| {
                 s.tracks
                     .iter()
-                    .map(|a| (format!("{} • {}", a.name, a.artists_info()), false))
+                    .map(|a| {
+                        (
+                            format!("{} • {}", a.display_name(), a.artists_info()),
+                            false,
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
@@ -613,7 +618,7 @@ fn render_artist_context_page_windows(
     let (album_list, n_albums) = {
         let album_items = albums
             .into_iter()
-            .map(|a| (a.name.clone(), false))
+            .map(|a| (format!("{1} • {0}", a.name, a.year()), false))
             .collect::<Vec<_>>();
 
         utils::construct_list_widget(
@@ -684,44 +689,44 @@ pub fn render_track_table_window(
 ) -> Result<()> {
     // get the current playing track's URI to decorate such track (if exists) in the track table
     let mut playing_track_uri = "".to_string();
-    let mut active_desc = "";
+    let mut playing_id = "";
     if let Some(ref playback) = state.player.read().playback {
         if let Some(rspotify_model::PlayableItem::Track(ref track)) = playback.item {
             playing_track_uri = track.id.as_ref().map(|id| id.uri()).unwrap_or_default();
 
-            active_desc = if playback.is_playing {
-                &state.app_config.play_icon
+            playing_id = if playback.is_playing {
+                &state.configs.app_config.play_icon
             } else {
-                &state.app_config.pause_icon
+                &state.configs.app_config.pause_icon
             };
         }
     }
 
-    let item_max_len = state.app_config.track_table_item_max_len;
     let n_tracks = tracks.len();
     let rows = tracks
         .into_iter()
         .enumerate()
         .map(|(id, t)| {
             let (id, style) = if playing_track_uri == t.id.uri() {
-                (active_desc.to_string(), ui.theme.current_playing())
+                (playing_id.to_string(), ui.theme.current_playing())
             } else {
                 ((id + 1).to_string(), Style::default())
             };
             Row::new(vec![
                 Cell::from(if data.user_data.is_liked_track(t) {
-                    &state.app_config.liked_icon
+                    &state.configs.app_config.liked_icon
                 } else {
                     ""
                 }),
                 Cell::from(id),
-                Cell::from(crate::utils::truncate_string(t.name.clone(), item_max_len)),
-                Cell::from(crate::utils::truncate_string(
-                    t.artists_info(),
-                    item_max_len,
+                Cell::from(t.display_name()),
+                Cell::from(t.artists_info()),
+                Cell::from(t.album_info()),
+                Cell::from(format!(
+                    "{}:{:02}",
+                    t.duration.as_secs() / 60,
+                    t.duration.as_secs() % 60,
                 )),
-                Cell::from(crate::utils::truncate_string(t.album_info(), item_max_len)),
-                Cell::from(crate::utils::format_duration(&t.duration)),
             ])
             .style(style)
         })
@@ -747,6 +752,7 @@ pub fn render_track_table_window(
             Constraint::Percentage(30),
             Constraint::Percentage(20),
         ])
+        .column_spacing(2)
         .highlight_style(ui.theme.selection_style(is_active));
 
     match ui.current_page_mut() {

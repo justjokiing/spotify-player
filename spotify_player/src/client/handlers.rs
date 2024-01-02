@@ -78,7 +78,7 @@ async fn handle_queue_change_event(
     }
     if needs_update {
         // In addition to `GetCurrentUserQueue` request, also update the current playback
-        // as there can be a mistmatch between the current playback and the current queue.
+        // as there can be a mismatch between the current playback and the current queue.
         client_pub
             .send_async(ClientRequest::GetCurrentPlayback)
             .await?;
@@ -98,11 +98,12 @@ pub async fn start_player_event_watchers(
 ) {
     // Start a watcher task that updates the playback every `playback_refresh_duration_in_ms` ms.
     // A positive value of `playback_refresh_duration_in_ms` is required to start the watcher.
-    if state.app_config.playback_refresh_duration_in_ms > 0 {
+    if state.configs.app_config.playback_refresh_duration_in_ms > 0 {
         tokio::task::spawn({
             let client_pub = client_pub.clone();
-            let playback_refresh_duration =
-                std::time::Duration::from_millis(state.app_config.playback_refresh_duration_in_ms);
+            let playback_refresh_duration = std::time::Duration::from_millis(
+                state.configs.app_config.playback_refresh_duration_in_ms,
+            );
             async move {
                 loop {
                     client_pub
@@ -139,7 +140,7 @@ pub async fn start_player_event_watchers(
 
     // Start the second task (main blocking task) for handling "high-frequency" events.
     // An event is categorized as "high-frequency" when
-    // - we want to handle it "immediately" to prevent users from experiencing a noticable delay
+    // - we want to handle it "immediately" to prevent users from experiencing a noticeable delay
     let refresh_duration = std::time::Duration::from_millis(200); // frequency = 5Hz
 
     // This timer is used to avoid making multiple `GetContext` requests in a short period of time.

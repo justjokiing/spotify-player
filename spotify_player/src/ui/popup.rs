@@ -200,6 +200,7 @@ pub fn render_shortcut_help_popup(
             vec![]
         } else {
             state
+                .configs
                 .keymap_config
                 .find_matched_prefix_keymaps(input)
                 .into_iter()
@@ -257,6 +258,7 @@ pub fn render_commands_help_popup(
 
     let mut map = BTreeMap::new();
     state
+        .configs
         .keymap_config
         .keymaps
         .iter()
@@ -318,11 +320,12 @@ pub fn render_queue_popup(
     rect: Rect,
 ) {
     use rspotify::model::{FullEpisode, FullTrack, PlayableItem};
-    fn get_playable_name(item: &PlayableItem) -> &str {
+    fn get_playable_name(item: &PlayableItem) -> String {
         match item {
             PlayableItem::Track(FullTrack { ref name, .. }) => name,
             PlayableItem::Episode(FullEpisode { ref name, .. }) => name,
         }
+        .to_string()
     }
     fn get_playable_artists(item: &PlayableItem) -> String {
         match item {
@@ -370,9 +373,9 @@ pub fn render_queue_popup(
                 .map(|(i, x)| {
                     Row::new(vec![
                         Cell::from(format!("{}", i + 1)),
-                        Cell::from(get_playable_name(x).to_string()),
-                        Cell::from(get_playable_artists(x).to_string()),
-                        Cell::from(get_playable_duration(x).to_string()),
+                        Cell::from(get_playable_name(x)),
+                        Cell::from(get_playable_artists(x)),
+                        Cell::from(get_playable_duration(x)),
                     ])
                 })
                 .collect::<Vec<_>>(),

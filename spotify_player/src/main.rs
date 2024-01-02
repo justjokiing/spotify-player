@@ -14,62 +14,12 @@ mod token;
 mod ui;
 mod utils;
 
-// as `tui` is not actively maintained, we migrate to use `ratatui`
-extern crate ratatui as tui;
-
 use anyhow::{Context, Result};
 use std::io::Write;
 
-fn init_app_cli_arguments() -> Result<clap::ArgMatches> {
-    let default_cache_folder = config::get_cache_folder_path()?;
-    let default_config_folder = config::get_config_folder_path()?;
-
-    let cmd = clap::Command::new("spotify_player")
-        .version("0.15.0")
-        .about("A command driven spotify player")
-        .author("Thang Pham <phamducthang1234@gmail>")
-        .subcommand(cli::init_get_subcommand())
-        .subcommand(cli::init_playback_subcommand())
-        .subcommand(cli::init_connect_subcommand())
-        .subcommand(cli::init_like_command())
-        .subcommand(cli::init_authenticate_command())
-        .subcommand(cli::init_playlist_subcommand())
-        .arg(
-            clap::Arg::new("theme")
-                .short('t')
-                .long("theme")
-                .value_name("THEME")
-                .help("Application theme"),
-        )
-        .arg(
-            clap::Arg::new("config-folder")
-                .short('c')
-                .long("config-folder")
-                .value_name("FOLDER")
-                .default_value(default_config_folder.into_os_string())
-                .help("Path to the application's config folder"),
-        )
-        .arg(
-            clap::Arg::new("cache-folder")
-                .short('C')
-                .long("cache-folder")
-                .value_name("FOLDER")
-                .default_value(default_cache_folder.into_os_string())
-                .help("Path to the application's cache folder"),
-        );
-
-    #[cfg(feature = "daemon")]
-    let cmd = cmd.arg(
-        clap::Arg::new("daemon")
-            .short('d')
-            .long("daemon")
-            .action(clap::ArgAction::SetTrue)
-            .help("Running the application as a daemon"),
-    );
-
-    Ok(cmd.get_matches())
-}
-
+// unused variables:
+// - `is_daemon` when the `streaming` feature is not enabled
+#[allow(unused_variables)]
 async fn init_spotify(
     client_pub: &flume::Sender<event::ClientRequest>,
     client: &client::Client,
@@ -78,7 +28,10 @@ async fn init_spotify(
 ) -> Result<()> {
     // if `streaming` feature is enabled, create a new streaming connection
     #[cfg(feature = "streaming")]
-    if state.app_config.enable_streaming {
+    if state.configs.app_config.enable_streaming == config::StreamingType::Always
+        || (state.configs.app_config.enable_streaming == config::StreamingType::DaemonOnly
+            && is_daemon)
+    {
         client.new_streaming_connection(state).await;
     }
 
@@ -91,13 +44,11 @@ async fn init_spotify(
     }
 
     // request user data
-    if !is_daemon {
-        client_pub.send(event::ClientRequest::GetCurrentUser)?;
-        client_pub.send(event::ClientRequest::GetUserPlaylists)?;
-        client_pub.send(event::ClientRequest::GetUserFollowedArtists)?;
-        client_pub.send(event::ClientRequest::GetUserSavedAlbums)?;
-        client_pub.send(event::ClientRequest::GetUserSavedTracks)?;
-    }
+    client_pub.send(event::ClientRequest::GetCurrentUser)?;
+    client_pub.send(event::ClientRequest::GetUserPlaylists)?;
+    client_pub.send(event::ClientRequest::GetUserFollowedArtists)?;
+    client_pub.send(event::ClientRequest::GetUserSavedAlbums)?;
+    client_pub.send(event::ClientRequest::GetUserSavedTracks)?;
 
     Ok(())
 }
@@ -151,15 +102,41 @@ async fn start_app(state: state::SharedState, is_daemon: bool) -> Result<()> {
     // client channels
     let (client_pub, client_sub) = flume::unbounded::<event::ClientRequest>();
 
+    #[cfg(feature = "pulseaudio-backend")]
+    {
+        // set environment variables for PulseAudio
+        if std::env::var("PULSE_PROP_application.name").is_err() {
+            std::env::set_var("PULSE_PROP_application.name", "spotify-player");
+        }
+        if std::env::var("PULSE_PROP_application.icon_name").is_err() {
+            std::env::set_var("PULSE_PROP_application.icon_name", "spotify");
+        }
+        if std::env::var("PULSE_PROP_stream.description").is_err() {
+            std::env::set_var(
+                "PULSE_PROP_stream.description",
+                format!(
+                    "Spotify Connect endpoint ({})",
+                    state.configs.app_config.device.name
+                ),
+            );
+        }
+        if std::env::var("PULSE_PROP_media.software").is_err() {
+            std::env::set_var("PULSE_PROP_media.software", "Spotify");
+        }
+        if std::env::var("PULSE_PROP_media.role").is_err() {
+            std::env::set_var("PULSE_PROP_media.role", "music");
+        }
+    }
+
     // create a librespot session
-    let auth_config = auth::AuthConfig::new(&state)?;
+    let auth_config = auth::AuthConfig::new(&state.configs)?;
     let session = auth::new_session(&auth_config, !is_daemon).await?;
 
-    // create a spotify API client
+    // create a Spotify API client
     let client = client::Client::new(
         session,
         auth_config,
-        state.app_config.client_id.clone(),
+        state.configs.app_config.client_id.clone(),
         client_pub.clone(),
     );
     client.init_token().await?;
@@ -167,7 +144,7 @@ async fn start_app(state: state::SharedState, is_daemon: bool) -> Result<()> {
     // initialize Spotify-related stuff
     init_spotify(&client_pub, &client, &state, is_daemon)
         .await
-        .context("failed to initialize the spotify data")?;
+        .context("Failed to initialize the Spotify data")?;
 
     // Spawn application's tasks
     let mut tasks = Vec::new();
@@ -177,8 +154,15 @@ async fn start_app(state: state::SharedState, is_daemon: bool) -> Result<()> {
         let client = client.clone();
         let state = state.clone();
         async move {
-            if let Err(err) = cli::start_socket(client, state).await {
-                tracing::warn!("Failed to run client socket for CLI: {err:#}");
+            let port = state.configs.app_config.client_port;
+            tracing::info!("Starting a client socket at 127.0.0.1:{port}");
+            match tokio::net::UdpSocket::bind(("127.0.0.1", port)).await {
+                Ok(socket) => cli::start_socket(client, socket, Some(state)).await,
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to create a client socket for handling CLI commands: {err:#}"
+                    )
+                }
             }
         }
     }));
@@ -220,7 +204,7 @@ async fn start_app(state: state::SharedState, is_daemon: bool) -> Result<()> {
     }
 
     #[cfg(feature = "media-control")]
-    if state.app_config.enable_media_control {
+    if state.configs.app_config.enable_media_control {
         // media control task
         tokio::task::spawn_blocking({
             let state = state.clone();
@@ -241,10 +225,8 @@ async fn start_app(state: state::SharedState, is_daemon: bool) -> Result<()> {
             // MacOS and Windows require an open window to be able to listen to media
             // control events. The below code will create an invisible window on startup
             // to listen to such events.
-            let event_loop = winit::event_loop::EventLoop::new();
-            event_loop.run(move |_, _, control_flow| {
-                *control_flow = winit::event_loop::ControlFlow::Wait;
-            });
+            let event_loop = winit::event_loop::EventLoop::new()?;
+            event_loop.run(move |_, _| {})?;
         }
     }
 
@@ -257,7 +239,7 @@ async fn start_app(state: state::SharedState, is_daemon: bool) -> Result<()> {
 
 fn main() -> Result<()> {
     // parse command line arguments
-    let args = init_app_cli_arguments()?;
+    let args = cli::init_cli()?.get_matches();
 
     // initialize the application's cache and config folders
     let config_folder: std::path::PathBuf = args
@@ -281,12 +263,12 @@ fn main() -> Result<()> {
         std::fs::create_dir_all(&cache_image_folder)?;
     }
 
-    // initialize the application state
-    let state = std::sync::Arc::new(state::State::new(
-        &config_folder,
-        &cache_folder,
-        args.get_one::<String>("theme"),
-    )?);
+    // initialize the application configs
+    let mut configs = state::Configs::new(&config_folder, &cache_folder)?;
+    if let Some(theme) = args.get_one::<String>("theme") {
+        // override the theme config if user specifies a `theme` cli argument
+        configs.app_config.theme = theme.to_owned();
+    }
 
     match args.subcommand() {
         None => {
@@ -294,9 +276,9 @@ fn main() -> Result<()> {
             init_logging(&cache_folder).context("failed to initialize application's logging")?;
 
             // log the application's configurations
-            tracing::info!("General configurations: {:?}", state.app_config);
-            tracing::info!("Theme configurations: {:?}", state.theme_config);
-            tracing::info!("Keymap configurations: {:?}", state.keymap_config);
+            tracing::info!("Configurations: {:?}", configs);
+
+            let state = std::sync::Arc::new(state::State::new(configs)?);
 
             #[cfg(feature = "daemon")]
             {
@@ -326,18 +308,6 @@ fn main() -> Result<()> {
             #[cfg(not(feature = "daemon"))]
             start_app(state, false)
         }
-        Some((cmd, args)) => match cli::handle_cli_subcommand(cmd, args, &state) {
-            Err(err) => match err.downcast_ref::<std::io::Error>() {
-                None => Err(err),
-                Some(io_err) => match io_err.kind() {
-                    std::io::ErrorKind::ConnectionRefused => {
-                        eprintln!("Error: {err}\nPlease make sure that there is a running `spotify_player` instance with a client socket running on port {}.", state.app_config.client_port);
-                        std::process::exit(1)
-                    }
-                    _ => Err(err),
-                },
-            },
-            Ok(()) => Ok(()),
-        },
+        Some((cmd, args)) => cli::handle_cli_subcommand(cmd, args, &configs),
     }
 }

@@ -1,4 +1,5 @@
 use clap::{builder::EnumValueParser, value_parser, Arg, ArgAction, ArgGroup, Command};
+use clap_complete::Shell;
 
 use super::{ContextType, ItemType, Key};
 
@@ -8,7 +9,7 @@ pub fn init_connect_subcommand() -> Command {
 
 pub fn init_get_subcommand() -> Command {
     Command::new("get")
-        .about("Get spotify data")
+        .about("Get Spotify data")
         .subcommand_required(true)
         .subcommand(
             Command::new("key").about("Get data by key").arg(
@@ -17,8 +18,12 @@ pub fn init_get_subcommand() -> Command {
                     .required(true),
             ),
         )
-        .subcommand(add_context_args(
-            Command::new("context").about("Get context data"),
+        .subcommand(add_id_or_name_group(
+            Command::new("item").about("Get a Spotify item's data").arg(
+                Arg::new("item_type")
+                    .value_parser(EnumValueParser::<ItemType>::new())
+                    .required(true),
+            ),
         ))
 }
 
@@ -26,8 +31,21 @@ fn init_playback_start_subcommand() -> Command {
     Command::new("start")
         .about("Start a new playback")
         .subcommand_required(true)
-        .subcommand(add_context_args(
-            Command::new("context").about("Start a context playback"),
+        .subcommand(add_id_or_name_group(
+            Command::new("context")
+                .about("Start a context playback")
+                .arg(
+                    Arg::new("context_type")
+                        .value_parser(EnumValueParser::<ContextType>::new())
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("shuffle")
+                        .short('s')
+                        .long("shuffle")
+                        .action(ArgAction::SetTrue)
+                        .help("Shuffle tracks within the launched playback"),
+                ),
         ))
         .subcommand(
             Command::new("liked")
@@ -57,16 +75,6 @@ fn init_playback_start_subcommand() -> Command {
         ))
 }
 
-fn add_context_args(cmd: Command) -> Command {
-    add_id_or_name_group(
-        cmd.arg(
-            Arg::new("context_type")
-                .value_parser(EnumValueParser::<ContextType>::new())
-                .required(true),
-        ),
-    )
-}
-
 fn add_id_or_name_group(cmd: Command) -> Command {
     cmd.arg(Arg::new("id").long("id").short('i'))
         .arg(Arg::new("name").long("name").short('n'))
@@ -83,6 +91,8 @@ pub fn init_playback_subcommand() -> Command {
         .subcommand_required(true)
         .subcommand(init_playback_start_subcommand())
         .subcommand(Command::new("play-pause").about("Toggle between play and pause"))
+        .subcommand(Command::new("play").about("Resume the current playback if stopped"))
+        .subcommand(Command::new("pause").about("Pause the current playback if playing"))
         .subcommand(Command::new("next").about("Skip to the next track"))
         .subcommand(Command::new("previous").about("Skip to the previous track"))
         .subcommand(Command::new("shuffle").about("Toggle the shuffle mode"))
@@ -127,6 +137,17 @@ pub fn init_like_command() -> Command {
 
 pub fn init_authenticate_command() -> Command {
     Command::new("authenticate").about("Authenticate the application")
+}
+
+pub fn init_generate_command() -> Command {
+    Command::new("generate")
+        .about("Generate shell completion for the application CLI")
+        .arg(
+            Arg::new("shell")
+                .action(ArgAction::Set)
+                .value_parser(value_parser!(Shell))
+                .required(true),
+        )
 }
 
 pub fn init_playlist_subcommand() -> Command {

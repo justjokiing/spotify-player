@@ -8,13 +8,14 @@ use std::{
 use anyhow::{Context as _, Result};
 use rand::seq::SliceRandom;
 use tokio::net::UdpSocket;
+use tracing::Instrument;
 
 use crate::{
-    cli::{ContextType, Request},
+    cli::Request,
     client::Client,
     config::get_cache_folder_path,
     event::PlayerRequest,
-    state::{Context, ContextId, Playback, SharedState},
+    state::{Context, ContextId, Playback, SharedState, SimplifiedPlayback},
 };
 use rspotify::{
     model::*,
@@ -23,18 +24,19 @@ use rspotify::{
 
 use super::*;
 
-pub async fn start_socket(client: Client, state: SharedState) -> Result<()> {
-    let port = state.app_config.client_port;
-    tracing::info!("Starting a client socket at 127.0.0.1:{port}");
-
-    let socket = UdpSocket::bind(("127.0.0.1", port)).await?;
-
+pub async fn start_socket(client: Client, socket: UdpSocket, state: Option<SharedState>) {
     // initialize the receive buffer to be 4096 bytes
-    let mut buf = [0; 4096];
+    let mut buf = [0; MAX_REQUEST_SIZE];
     loop {
         match socket.recv_from(&mut buf).await {
             Err(err) => tracing::warn!("Failed to receive from the socket: {err:#}"),
             Ok((n_bytes, dest_addr)) => {
+                if n_bytes == 0 {
+                    // received a connection request from the destination address
+                    socket.send_to(&[], dest_addr).await.unwrap_or_default();
+                    continue;
+                }
+
                 let req_buf = &buf[0..n_bytes];
                 let request: Request = match serde_json::from_slice(req_buf) {
                     Ok(v) => v,
@@ -44,18 +46,25 @@ pub async fn start_socket(client: Client, state: SharedState) -> Result<()> {
                     }
                 };
 
-                tracing::info!("Handling socket request: {request:?}...");
-                let response = match handle_socket_request(&client, &state, request).await {
-                    Err(err) => {
-                        tracing::error!("Failed to handle socket request: {err:#}");
-                        let msg = format!("Bad request: {err:#}");
-                        Response::Err(msg.into_bytes())
-                    }
-                    Ok(data) => Response::Ok(data),
-                };
-                send_response(response, &socket, dest_addr)
-                    .await
-                    .unwrap_or_default();
+                let span = tracing::info_span!("socket_request", request = ?request, dest_addr = ?dest_addr);
+
+                async {
+                    let response = match handle_socket_request(&client, &state, request).await {
+                        Err(err) => {
+                            tracing::error!("Failed to handle socket request: {err:#}");
+                            let msg = format!("Bad request: {err:#}");
+                            Response::Err(msg.into_bytes())
+                        }
+                        Ok(data) => Response::Ok(data),
+                    };
+                    send_response(response, &socket, dest_addr)
+                        .await
+                        .unwrap_or_default();
+
+                    tracing::info!("Successfully handled the socket request.",);
+                }
+                .instrument(span)
+                .await;
             }
         }
     }
@@ -78,20 +87,37 @@ async fn send_response(
     Ok(())
 }
 
+async fn current_playback(
+    client: &Client,
+    state: &Option<SharedState>,
+) -> Result<Option<CurrentPlaybackContext>> {
+    // get current playback from the application's state, if exists, or by making an API request
+    match state {
+        Some(ref state) => Ok(state.player.read().current_playback()),
+        None => client
+            .spotify
+            .current_playback(None, None::<Vec<_>>)
+            .await
+            .context("get current playback"),
+    }
+}
+
 async fn handle_socket_request(
     client: &Client,
-    state: &SharedState,
+    state: &Option<SharedState>,
     request: super::Request,
 ) -> Result<Vec<u8>> {
     if client.spotify.session().await.is_invalid() {
-        tracing::info!("Spotify client's session is invalid, re-creating a new session...");
-        client.new_session(state).await?;
+        if let Some(state) = state {
+            tracing::info!("Spotify client's session is invalid, re-creating a new session...");
+            client.new_session(state).await?;
+        }
     }
 
     match request {
-        Request::Get(GetRequest::Key(key)) => handle_get_key_request(client, key).await,
-        Request::Get(GetRequest::Context(context_type, context_id)) => {
-            handle_get_context_request(client, context_type, context_id).await
+        Request::Get(GetRequest::Key(key)) => handle_get_key_request(client, state, key).await,
+        Request::Get(GetRequest::Item(item_type, id_or_name)) => {
+            handle_get_item_request(client, item_type, id_or_name).await
         }
         Request::Playback(command) => {
             handle_playback_request(client, state, command).await?;
@@ -119,13 +145,18 @@ async fn handle_socket_request(
             Ok(Vec::new())
         }
         Request::Like { unlike } => {
-            let id = state
-                .player
-                .read()
-                .current_playing_track()
-                .and_then(|t| t.id.to_owned());
+            let playback = current_playback(client, state).await?;
 
-            if let Some(id) = id {
+            // get currently playing track from the playback
+            let track = match playback {
+                None => None,
+                Some(ref playback) => match playback.item {
+                    Some(rspotify::model::PlayableItem::Track(ref track)) => Some(track),
+                    _ => None,
+                },
+            };
+
+            if let Some(id) = track.and_then(|t| t.id.to_owned()) {
                 if unlike {
                     client
                         .spotify
@@ -139,19 +170,20 @@ async fn handle_socket_request(
             Ok(Vec::new())
         }
         Request::Playlist(command) => {
-            let resp = handle_playlist_request(client, state, command).await?;
+            let resp = handle_playlist_request(client, command).await?;
             Ok(resp.into_bytes())
         }
     }
 }
 
-async fn handle_get_key_request(client: &Client, key: Key) -> Result<Vec<u8>> {
+async fn handle_get_key_request(
+    client: &Client,
+    state: &Option<SharedState>,
+    key: Key,
+) -> Result<Vec<u8>> {
     Ok(match key {
         Key::Playback => {
-            let playback = client
-                .spotify
-                .current_playback(None, None::<Vec<_>>)
-                .await?;
+            let playback = current_playback(client, state).await?;
             serde_json::to_vec(&playback)?
         }
         Key::Devices => {
@@ -187,7 +219,8 @@ async fn handle_get_key_request(client: &Client, key: Key) -> Result<Vec<u8>> {
 
 /// Get a Spotify item's ID from its `IdOrName` representation
 async fn get_spotify_id(client: &Client, typ: ItemType, id_or_name: IdOrName) -> Result<ItemId> {
-    // For `cli::ContextId::Name`, we search for the first item matching the name and return its spotify id
+    // For `IdOrName::Name`, we search for the first item matching the name and return its Spotify id.
+    // The item's id is then used to retrieve the item's data.
 
     let sid = match typ {
         ItemType::Playlist => match id_or_name {
@@ -271,57 +304,81 @@ async fn get_spotify_id(client: &Client, typ: ItemType, id_or_name: IdOrName) ->
     Ok(sid)
 }
 
-async fn handle_get_context_request(
+async fn handle_get_item_request(
     client: &Client,
-    context_type: ContextType,
-    context_id: IdOrName,
+    item_type: ItemType,
+    id_or_name: IdOrName,
 ) -> Result<Vec<u8>> {
-    let sid = get_spotify_id(client, context_type.into(), context_id).await?;
-    let context = match sid {
-        ItemId::Playlist(id) => client.playlist_context(id).await?,
-        ItemId::Album(id) => client.album_context(id).await?,
-        ItemId::Artist(id) => client.artist_context(id).await?,
-        _ => unreachable!(),
-    };
-
-    Ok(serde_json::to_vec(&context)?)
+    let sid = get_spotify_id(client, item_type, id_or_name).await?;
+    Ok(match sid {
+        ItemId::Playlist(id) => serde_json::to_vec(&client.playlist_context(id).await?)?,
+        ItemId::Album(id) => serde_json::to_vec(&client.album_context(id).await?)?,
+        ItemId::Artist(id) => serde_json::to_vec(&client.artist_context(id).await?)?,
+        ItemId::Track(id) => serde_json::to_vec(&client.track(id).await?)?,
+    })
 }
 
 async fn handle_playback_request(
     client: &Client,
-    state: &SharedState,
+    state: &Option<SharedState>,
     command: Command,
 ) -> Result<()> {
+    let playback = match state {
+        Some(state) => state.player.read().buffered_playback.clone(),
+        None => {
+            let playback = client
+                .spotify
+                .current_playback(None, None::<Vec<_>>)
+                .await?;
+            playback.as_ref().map(SimplifiedPlayback::from_playback)
+        }
+    };
+
     let player_request = match command {
         Command::StartRadio(item_type, id_or_name) => {
             let sid = get_spotify_id(client, item_type, id_or_name).await?;
             let tracks = client.radio_tracks(sid.uri()).await?;
 
-            PlayerRequest::StartPlayback(Playback::URIs(
-                tracks.into_iter().map(|t| t.id).collect(),
+            PlayerRequest::StartPlayback(
+                Playback::URIs(tracks.into_iter().map(|t| t.id).collect(), None),
                 None,
-            ))
+            )
         }
         Command::StartLikedTracks { limit, random } => {
-            let mut tracks = client.current_user_saved_tracks().await?;
+            // get a list of liked tracks' ids
+            let mut ids: Vec<_> = if let Some(ref state) = state {
+                state
+                    .data
+                    .read()
+                    .user_data
+                    .saved_tracks
+                    .values()
+                    .map(|t| t.id.to_owned())
+                    .collect()
+            } else {
+                client
+                    .current_user_saved_tracks()
+                    .await?
+                    .into_iter()
+                    .map(|t| t.id)
+                    .collect()
+            };
 
             if random {
                 let mut rng = rand::thread_rng();
-                tracks.shuffle(&mut rng)
+                ids.shuffle(&mut rng)
             }
 
-            let ids = if tracks.len() > limit {
-                tracks[0..limit].iter()
-            } else {
-                tracks.iter()
-            }
-            .map(|t| t.id.to_owned())
-            .collect();
+            ids.truncate(limit);
 
-            PlayerRequest::StartPlayback(Playback::URIs(ids, None))
+            PlayerRequest::StartPlayback(Playback::URIs(ids, None), None)
         }
-        Command::StartContext(context_type, context_id) => {
-            let sid = get_spotify_id(client, context_type.into(), context_id).await?;
+        Command::StartContext {
+            context_type,
+            id_or_name,
+            shuffle,
+        } => {
+            let sid = get_spotify_id(client, context_type.into(), id_or_name).await?;
             let context_id = match sid {
                 ItemId::Playlist(id) => ContextId::Playlist(id),
                 ItemId::Album(id) => ContextId::Album(id),
@@ -329,45 +386,77 @@ async fn handle_playback_request(
                 _ => unreachable!(),
             };
 
-            PlayerRequest::StartPlayback(Playback::Context(context_id, None))
+            PlayerRequest::StartPlayback(Playback::Context(context_id, None), Some(shuffle))
         }
         Command::PlayPause => PlayerRequest::ResumePause,
+        Command::Play => PlayerRequest::Resume,
+        Command::Pause => PlayerRequest::Pause,
         Command::Next => PlayerRequest::NextTrack,
         Command::Previous => PlayerRequest::PreviousTrack,
         Command::Shuffle => PlayerRequest::Shuffle,
         Command::Repeat => PlayerRequest::Repeat,
-        Command::Volume { percent, is_offset } => match state.player.read().buffered_playback {
-            Some(ref playback) => {
-                let percent = if is_offset {
-                    std::cmp::max(0, (playback.volume.unwrap_or_default() as i8) + percent)
-                } else {
-                    percent
-                };
-                PlayerRequest::Volume(percent.try_into()?)
-            }
-            None => anyhow::bail!("No playback found!"),
-        },
-        Command::Seek(position_offset_ms) => {
-            let progress = match state.player.read().playback_progress() {
-                Some(progress) => progress,
-                None => {
-                    anyhow::bail!("Playback has no progress!");
-                }
+        Command::Volume { percent, is_offset } => {
+            let volume = playback
+                .as_ref()
+                .context("no active playback found!")?
+                .volume
+                .context("playback has no volume!")?;
+            let percent = if is_offset {
+                std::cmp::max(0, (volume as i8) + percent)
+            } else {
+                percent
             };
+            PlayerRequest::Volume(percent.try_into()?)
+        }
+        Command::Seek(position_offset_ms) => {
+            // Playback's progress cannot be computed trivially without knowing the `playback` variable in
+            // the function scope is from the application's state (cached) or the `current_playback` API.
+            // Therefore, we need to make an additional API request to get the playback's progress.
+            let progress = client
+                .spotify
+                .current_playback(None, None::<Vec<_>>)
+                .await?
+                .context("no active playback found!")?
+                .progress
+                .context("playback has no progress!")?;
             PlayerRequest::SeekTrack(progress + chrono::Duration::milliseconds(position_offset_ms))
         }
     };
 
-    client.handle_player_request(state, player_request).await?;
-    client.update_playback(state);
+    if let Some(ref state) = state {
+        // A non-null application's state indicates there is a running application instance.
+        // To reduce the latency of the CLI command, the player request is handled asynchronously
+        // knowing that the application will outlive the asynchronous task.
+        tokio::task::spawn({
+            let client = client.clone();
+            let state = state.clone();
+            async move {
+                match client.handle_player_request(player_request, playback).await {
+                    Ok(playback) => {
+                        // update application's states
+                        state.player.write().buffered_playback = playback;
+                        client.update_playback(&state);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to handle a player request for playback CLI command: {err:#}"
+                        );
+                    }
+                }
+            }
+        });
+    } else {
+        // Handles the player request synchronously
+        client
+            .handle_player_request(player_request, playback)
+            .await?;
+    }
     Ok(())
 }
 
-async fn handle_playlist_request(
-    client: &Client,
-    state: &SharedState,
-    command: PlaylistCommand,
-) -> Result<String> {
+async fn handle_playlist_request(client: &Client, command: PlaylistCommand) -> Result<String> {
+    let uid = client.spotify.current_user().await?.id;
+
     match command {
         PlaylistCommand::New {
             name,
@@ -375,13 +464,10 @@ async fn handle_playlist_request(
             collab,
             description,
         } => {
-            let user = state.data.read().user_data.user.to_owned().unwrap();
-            let id = user.id;
-
             let resp = client
                 .spotify
                 .user_playlist_create(
-                    id,
+                    uid,
                     name.as_str(),
                     Some(public),
                     Some(collab),
@@ -394,9 +480,6 @@ async fn handle_playlist_request(
             ))
         }
         PlaylistCommand::Delete { id } => {
-            let user = state.data.read().user_data.user.to_owned().unwrap();
-            let uid = user.id;
-
             let following = client
                 .spotify
                 .playlist_check_follow(id.to_owned(), &[uid])
@@ -432,9 +515,6 @@ async fn handle_playlist_request(
             delete,
         } => playlist_import(client, import_from, import_to, delete).await,
         PlaylistCommand::Fork { id } => {
-            let user = state.data.read().user_data.user.to_owned().unwrap();
-            let uid = user.id;
-
             let from = client
                 .spotify
                 .playlist(id.to_owned(), None, None)
@@ -465,9 +545,6 @@ async fn handle_playlist_request(
             Ok(result)
         }
         PlaylistCommand::Sync { id, delete } => {
-            let user = state.data.read().user_data.user.to_owned().unwrap();
-            let uid = user.id;
-
             // Get import dir/file
             let imports_dir = get_cache_folder_path()?.join("imports");
 
